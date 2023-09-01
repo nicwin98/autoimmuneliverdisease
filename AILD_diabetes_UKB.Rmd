@@ -1,0 +1,806 @@
+---
+title: "Autoimmune liver diseases and diabetes"
+author: "Anne-Sofie H. Jensen and Marie Winther-Sorensen"
+date: "2023-09-01"
+output:
+  html_document: default
+  word_document: default
+---
+
+```{r echo=T, results='hide', warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(here)
+library(ukbtools)
+library(stringr)
+library(data.table)
+library(MatchIt)
+library(epitools)
+library(ggplot2)
+library(ggsignif)
+library(ResourceSelection)
+df <- fread(here("data-raw/ukb_all_datasets.csv"), data.table = FALSE)
+getwd()
+```
+
+### Remove individuals who have withdrawn
+```{r echo=T, results='hide', message=FALSE, warning=FALSE}
+withdraw <- read_csv(here("data/Withdrawal.csv"), col_names = "eid") 
+df <- anti_join(df, withdraw, by = "eid")
+    ```
+
+
+### Retrieving ICD diagnoses
+```{r}
+ukb_icd_code_meaning(icd.code = c("K732", "K754", "K738", "K743", "E10", "E11", "E14", "K70", "K760", "K703","B180","B181","B182","K746","I850","I859","I982","I983","K766","K767"), icd.version = 10)
+```
+
+### Create function to make a new dataframe only with ID's with a specific ICD10.
+
+https://stackoverflow.com/questions/67601507/r-using-dplyr-to-find-and-filter-for-a-string-in-a-whole-data-frame
+```{r echo=T, results='hide'}
+find_text_filter <- function(df, tt) {
+    res <- df %>%
+        filter(if_any(where(is.character), ~ str_detect(.x, tt)))
+    return(res)
+}
+```
+
+We will now create a data frame with a column (TRUE/FALSE) for each liver disease and type of diabetes, added one by one.
+
+Autoimmune liver diseases and cirrhosis
+```{r echo=T, results='hide'}
+# New dataframe only with individuals with AIH diagnosis (K73.2 + K73.8 + K75.4) and add column of AIH which is true for all these individuals
+
+df_AIH <- df %>%
+    mutate(df, AIH = TRUE) %>%
+    find_text_filter("K732|K738|K754")
+
+# Then merge df and df_AIH by ID (eid), but only add the column of AIH
+df_merge <- select(df_AIH, eid, AIH) %>%
+    full_join(df, df_AIH, by = "eid") # full_join leaves empty rows (i.e all that do not contain AIH remain NA)
+
+# Add Primary biliary cholangitis K743
+df_PBC <- df %>%
+    mutate(df, PBC = TRUE) %>%
+    find_text_filter("K743")
+
+df_merge <- select(df_PBC, eid, PBC) %>%
+    full_join(df_merge, df_PBC, by = "eid")
+
+# Make individuals having both AIH and PBC (overlap syndrome) into a new variable (AIH.PBC)
+df_merge$AIH.PBC[df_merge$AIH==T & df_merge$PBC ==T] <- TRUE
+df_merge$AIH[df_merge$AIH.PBC == T] <- NA
+df_merge$PBC[df_merge$AIH.PBC == T] <- NA
+
+# Add chronic hep B
+df_HBV <- df %>%
+    mutate(df, HBV = TRUE) %>%
+    find_text_filter("B180|B181")
+
+df_merge <- select(df_HBV, eid, HBV) %>%
+    full_join(df_merge, df_HBV, by = "eid")
+
+# Add chronic hep C
+df_HCV <- df %>%
+    mutate(df, HCV = TRUE) %>%
+    find_text_filter("B182") 
+
+df_merge <- select(df_HCV, eid, HCV) %>%
+    full_join(df_merge, df_HCV, by = "eid")
+
+# Deleting those with AIH that have concurrent HBV/HCV
+
+df_merge$AIH[df_merge$HBV == T & is.na(df_merge$HCV)] <- NA
+df_merge$AIH[is.na(df_merge$HBV) & df_merge$HCV == T] <- NA
+df_merge$AIH[df_merge$HBV == T & df_merge$HCV == T] <- NA
+
+# Deleting those with PBC that have concurrent HBV/HCV
+
+df_merge$PBC[df_merge$HBV == T & is.na(df_merge$HCV)] <- NA
+df_merge$PBC[is.na(df_merge$HBV) & df_merge$HCV == T] <- NA
+
+# Cirrhosis
+df_cir <- df %>%
+    mutate(df, cir = TRUE) %>%
+    find_text_filter("K746|I850|I859|I982|I983|K729|K703|K766|K767")
+
+df_merge <- select(df_cir, eid, cir) %>%
+    full_join(df_merge, df_cir, by = "eid")
+
+# Stringent cirrhosis definition
+df_cir2 <- df %>%
+    mutate(df, cir2 = TRUE) %>%
+    find_text_filter("K746|K703")
+
+df_merge <- select(df_cir2, eid, cir2) %>%
+    full_join(df_merge, df_cir2, by = "eid")
+
+```
+
+
+Type 2 diabetes: E11+E14
+Type 1 diabetes: E10
+Exclusion: if only gestational diabetes => no diabetes
+
+```{r echo=TRUE, results = 'hide'}
+# T2D
+df_T2D <- df %>%
+    mutate(df, T2D = TRUE) %>%
+    find_text_filter("E11|E14")
+
+df_merge <- select(df_T2D, eid, T2D) %>%
+    full_join(df_merge, df_T2D, by = "eid")
+
+# T1D
+df_T1D <- df %>%
+    mutate(df, T1D = TRUE) %>%
+    find_text_filter("E10")
+
+df_merge <- select(df_T1D, eid, T1D) %>%
+    full_join(df_merge, df_T1D, by = "eid")
+
+# Remove diabetes diagnosis if gestational diabetes only
+df_merge$gdmonly[df_merge$gestational_diabetes_only_f4041_0_0 == 1 | df_merge$gestational_diabetes_only_f4041_1_0 == 1 | df_merge$gestational_diabetes_only_f4041_2_0 == 1 | df_merge$gestational_diabetes_only_f4041_3_0 == 1] <- T
+df_merge$T1D[df_merge$gdmonly == T & df_merge$T2D == T] <- NA
+df_merge$T2D[df_merge$gdmonly == T & is.na(df_merge$T1D)] <- NA
+df_merge$T1D[df_merge$gdmonly == T & is.na(df_merge$T2D)] <- NA
+
+```
+
+### Diabetes medication codes
+#### Metformin
+1140884600	metformin
+1140874686  glucophage 500 mg tablet 
+1141189090	rosiglitazone 1mg / metformin 500mg tablet
+
+#### Sulfonylureas
+1140874718  glibenclamide 
+1140874744	gliclazide
+1140874746  diamicron 80 mg tablet 
+1141152590  glimepiride
+1141156984  amaryl 1 mg tablet
+1140874646	glipizide
+1141157284	glipizide product
+1140874652  minodiab 2.5 mg tablet
+1140874674  tolbutamide
+1140874728  euglucon 2.5 mg
+
+#### Others
+1140868902	acarbose
+1140868908  glucobay 50 mg tablet
+1140857508  glucotard 5g/sachet mini-tablet
+1140882964  oral hypoglycemic
+
+#### Metglitinides
+1141173882	nateglinide
+1141173786  starlix 60 mg tablet
+1141168660	repaglinide
+
+#### Glitazones
+1141171646	pioglitazone
+1141171652  actos 15 mg tablet
+1141153254  troglitazone
+1141177600	rosiglitazone
+1141177606  avandia 4mg tablet
+
+#### Insulin
+1140883066	insulin product
+
+### Filter for oral antihyperglycemic drugs and insulin
+```{r echo=TRUE, results='hide'}
+# Since the columns with medication codes (treatmentmedication_code_f20003_0_i) are integers, we create a new function taking integers as inputs:
+
+find_drug_function <- function(df, tt) {
+    res <- df %>%
+        filter(if_any(where(is.integer), ~ str_detect(.x, tt)))
+    return(res)}
+
+# Oral T2D treatment
+df_oral_T2D_drug <- df %>%
+    mutate(df, oral_T2D_drug = TRUE) %>%
+    find_drug_function("1140874718|1140874744|1140874746|1141152590|1141156984|1140874646|1141157284|1140874652|1140874674|1140874728|1140868902|1140868908|1140857508|1141173882|1141173786|1141168660|1141171646|1141171652|1141153254|1141177600|1141177606|1140882964")
+    
+df_merge <- select(df_oral_T2D_drug, eid, oral_T2D_drug) %>%
+    full_join(df_merge, df_oral_T2D_drug, by = "eid")
+
+# Metformin treatment
+df_metformin <- df %>%
+    mutate(df, metformin = TRUE) %>%
+    find_drug_function("1140884600|1140874686|1141189090") 
+
+df_merge <- select(df_metformin, eid, metformin) %>%
+    full_join(df_merge, df_metformin, by = "eid")
+
+# Insulin treatment
+df_insulin <- df %>%
+    mutate(df, insulin_treatment = TRUE) %>%
+    find_drug_function("1140883066")
+
+df_merge <- select(df_insulin, eid, insulin_treatment) %>%
+    full_join(df_merge, df_insulin, by = "eid")
+
+
+```
+
+### Calculate sum of average weekly intake of alcohol
+
+```{r echo=TRUE, results='hide'}
+# Set prefer not to answer and do not know (-1 and -3) to NA
+df_merge$average_weekly_beer_plus_cider_intake_f1588_0_0[df_merge$average_weekly_beer_plus_cider_intake_f1588_0_0<0] <- NA
+df_merge$average_weekly_champagne_plus_white_wine_intake_f1578_0_0[df_merge$average_weekly_champagne_plus_white_wine_intake_f1578_0_0<0] <- NA
+df_merge$average_weekly_fortified_wine_intake_f1608_0_0[df_merge$average_weekly_fortified_wine_intake_f1608_0_0<0] <- NA
+df_merge$average_weekly_intake_of_other_alcoholic_drinks_f5364_0_0[df_merge$average_weekly_intake_of_other_alcoholic_drinks_f5364_0_0<0] <- NA
+df_merge$average_weekly_red_wine_intake_f1568_0_0[df_merge$average_weekly_red_wine_intake_f1568_0_0<0] <- NA
+df_merge$average_weekly_spirits_intake_f1598_0_0[df_merge$average_weekly_spirits_intake_f1598_0_0<0] <- NA
+
+# units of alcohol in beverages: https://www.nhs.uk/live-well/alcohol-advice/calculating-alcohol-units/
+
+# weekly units of alcohol - redwine (f1568), 1 glass = 2.1 units
+df_merge$average_weekly_red_wine_intake_f1568_0_0 <- df_merge$average_weekly_red_wine_intake_f1568_0_0 * 2.1
+# weekly units of alcohol - champagne etc (f1578), 1 glass = 2.1 units
+df_merge$average_weekly_champagne_plus_white_wine_intake_f1578_0_0 <- df_merge$average_weekly_champagne_plus_white_wine_intake_f1578_0_0 * 2.1
+# weekly units of alcohol - beer and cider (f1588), 1 pint = 2 units
+df_merge$average_weekly_beer_plus_cider_intake_f1588_0_0 <- df_merge$average_weekly_beer_plus_cider_intake_f1588_0_0 * 2
+# weekly units of alcohol - spirits (f1598), 1 measure = 1 unit (no calculation needed)
+# weekly units of alcohol - fortified wine (f1608), 1 measure = 1 unit (no calculation needed)
+# weekly units of other alcoholic drinks incl alcopops, 1 glass = 1.5 units
+df_merge$average_weekly_intake_of_other_alcoholic_drinks_f5364_0_0 <- df_merge$average_weekly_intake_of_other_alcoholic_drinks_f5364_0_0 * 1.5
+
+#Calculate the sum of weekly units alcoholic intake
+df_merge <- df_merge %>%
+    rowwise() %>%
+    mutate(weekly_alcohol = sum(average_weekly_beer_plus_cider_intake_f1588_0_0,
+    average_weekly_champagne_plus_white_wine_intake_f1578_0_0,
+    average_weekly_fortified_wine_intake_f1608_0_0,
+    average_weekly_intake_of_other_alcoholic_drinks_f5364_0_0,
+    average_weekly_red_wine_intake_f1568_0_0,
+    average_weekly_spirits_intake_f1598_0_0,
+    na.rm=T))
+
+```
+
+### Defining NAFLD
+```{r echo =TRUE, results='hide'}
+# NAFLD
+df_NAFLD <- df %>%
+    mutate(df, NAFLD = TRUE) %>%
+    find_text_filter("K760")
+
+df_merge <- select(df_NAFLD, eid, NAFLD) %>%
+    full_join(df_merge, df_NAFLD, by = "eid")
+
+# Number of PDFF measures in dataset with 40534 variable
+table(is.na(df_merge$proton_density_fat_fraction_pdff_f40061_2_0))
+
+# Add pdff > 5.5 for women and men based on alcohol intake (NAFLD when drinking less than 140 g alcohol per week for women and less than 210 g alcohol per week for men (EASL guideline 2016). 1 unit = 8 g alcohol => NAFLD when less than < 17.5 units alcohol/week for women and 26.25 units alcohol/week for men
+df_merge$NAFLD[df_merge$proton_density_fat_fraction_pdff_f40061_2_0 > 5.5 &
+                 df_merge$sex_f31_0_0 == "Female" &
+                 df_merge$weekly_alcohol < 17.5] <- T
+df_merge$NAFLD[df_merge$proton_density_fat_fraction_pdff_f40061_2_0 > 5.5 &
+                 df_merge$sex_f31_0_0 == "Male" &
+                 df_merge$weekly_alcohol<26.25] <- T
+
+```
+
+
+### Defining alcoholic liver diseases
+```{r echo=TRUE, results='hide'}
+# Add ALD K70
+df_ALD <- df %>%
+    mutate(df, ALD = TRUE) %>%
+    find_text_filter("K70")
+
+df_merge <- select(df_ALD, eid, ALD) %>%
+    full_join(df_merge, ALD, by = "eid")
+
+# Add pdff > 5.5 for women and men based on alcohol intake
+df_merge$ALD[df_merge$proton_density_fat_fraction_pdff_f40061_2_0 > 5.5 &
+                 df_merge$sex_f31_0_0 == "Female" &
+                 df_merge$weekly_alcohol >= 17.5] <- T
+df_merge$ALD[df_merge$proton_density_fat_fraction_pdff_f40061_2_0 > 5.5 &
+                 df_merge$sex_f31_0_0=="Male" &
+                 df_merge$weekly_alcohol >= 26.25] <- T
+
+```
+
+
+### Tidy up dataframe
+```{r echo=TRUE, results='hide'}
+# Make NA -> FALSE
+df_final <- df_merge %>%
+    replace_na(list(
+        T1D = FALSE,
+        T2D = FALSE,
+        AIH = FALSE,
+        PBC = FALSE,
+        AIH.PBC = FALSE,
+        NAFLD = FALSE,
+        ALD = FALSE,
+        hh = FALSE,
+        insulin_treatment = FALSE,
+        oral_T2D_drug = FALSE,
+        metformin = FALSE,
+        cir = FALSE,
+        cir2 = FALSE)) # Make NA's FALSE
+
+# Clean up dataframe
+df_final <- df_final %>%
+    select(ID = eid,
+           Age = age_when_attended_assessment_centre_f21003_0_0,
+           Sex = sex_f31_0_0,
+           hba1c = glycated_haemoglobin_hba1c_f30750_0_0,
+           BMI = body_mass_index_bmi_f21001_0_0,
+           AIH,
+           PBC,
+           AIH.PBC,
+           NAFLD,
+           cir,
+           cir2,
+           ALD,
+           T1D,
+           T2D,
+           insulin_treatment,
+           oral_T2D_drug,
+           metformin,
+           age_diabetes_diagnosed_f2976_0_0,
+           age_diabetes_diagnosed_f2976_1_0,
+           age_diabetes_diagnosed_f2976_2_0,
+           age_diabetes_diagnosed_f2976_3_0,
+           started_insulin_within_one_year_diagnosis_of_diabetes_f2986_0_0,
+           started_insulin_within_one_year_diagnosis_of_diabetes_f2986_1_0,
+           started_insulin_within_one_year_diagnosis_of_diabetes_f2986_2_0,
+           started_insulin_within_one_year_diagnosis_of_diabetes_f2986_3_0,
+           ethnicity = ethnic_background_f21000_0_0)
+
+```
+
+### Defining diabetes
+
+```{r echo = TRUE, results='hide'}
+
+# MAke those individuals wihtout diabetes diagnosis as T2D if hba1c above 48:
+df_final$T2D[df_final$hba1c>48 & (df_final$T2D == F & df_final$T1D == F)] <-  T
+
+# Make those individuals without diabetes diagnosis as T2D if oral T2D medication (excluding metformin):
+df_final$T2D[df_final$oral_T2D_drug == T & (df_final$T2D == F & df_final$T1D == F)] <- T
+
+# Make those T1D individuals on oral T2D drug medication T2D:
+df_final$T1D[(df_final$T2D == T & df_final$T1D == T) & (df_final$oral_T2D_drug == T | df_final$metformin == T)] <- F
+df_final$T2D[df_final$T1D == T & (df_final$oral_T2D_drug == T | df_final$metformin == T)] <- T
+df_final$T1D[df_final$oral_T2D_drug == T | df_final$metformin == T] <- F
+
+# Make those diagnosed <20 y age as T1D
+df_final$T2D[(df_final$age_diabetes_diagnosed_f2976_0_0 < 20 | df_final$age_diabetes_diagnosed_f2976_1_0 < 20 | df_final$age_diabetes_diagnosed_f2976_2_0 < 20 | df_final$age_diabetes_diagnosed_f2976_3_0 < 20 ) & df_final$T1D == T & df_final$T2D == T] <- F
+
+# Make those with double diagnosis as T1D if insulin treatment within 1 year of diagnosis and actual insulin treatment:
+df_final$ins1y[df_final$started_insulin_within_one_year_diagnosis_of_diabetes_f2986_0_0 == 1 | df_final$started_insulin_within_one_year_diagnosis_of_diabetes_f2986_1_0 == 1 | df_final$started_insulin_within_one_year_diagnosis_of_diabetes_f2986_2_0 == 1 | df_final$started_insulin_within_one_year_diagnosis_of_diabetes_f2986_3_0 == 1] <- T 
+df_final$ins1y[is.na(df_final$ins1y)] <- F
+df_final$T2D[df_final$T1D == T & df_final$T2D == T & (df_final$ins1y & df_final$insulin_treatment)] <- F
+
+# Making those with double diagnosis T1D and T2D as T2D
+df_final$T1D[df_final$T1D == T & df_final$T2D == T] <- F
+
+# Prevalence estimate (n(diagnosis)/total count)
+count(df_final)
+table(df_final$AIH)
+table(df_final$PBC)
+table(df_final$AIH.PBC)
+table(df_final$NAFLD)
+table(df_final$ALD)
+table(df_final$T1D)
+table(df_final$cir)
+table(df_final$NAFLD)
+
+df_final %>%
+      count(T1D, T2D)
+
+```
+
+### Ethnicity
+
+```{r echo=TRUE, results='hide'}
+# All ethnic groups
+df_final$ethnic_all <- df_final$ethnicity
+df_final$ethnic_all[df_final$ethnic_all=="Caribbean"] <- 4001
+df_final$ethnic_all[df_final$ethnic_all=="Indian"] <- 3001
+df_final$ethnic_all[df_final$ethnic_all=="White"] <- 1
+df_final$ethnic_all[df_final$ethnic_all=="White and Black Caribbean"] <- 2001
+df_final$ethnic_all[df_final$ethnic_all=="British"] <- 1001
+df_final$ethnic_all[df_final$ethnic_all=="Pakistani"] <- 3002
+df_final$ethnic_all[df_final$ethnic_all=="Mixed"] <- 2
+df_final$ethnic_all[df_final$ethnic_all=="African"] <- 4002
+df_final$ethnic_all[df_final$ethnic_all=="Irish"] <- 1002
+df_final$ethnic_all[df_final$ethnic_all=="White and Black African"] <- 2002
+df_final$ethnic_all[df_final$ethnic_all=="Bangladeshi"] <- 3003
+df_final$ethnic_all[df_final$ethnic_all=="Asian or Asian British"] <- 3
+df_final$ethnic_all[df_final$ethnic_all=="Any other Black background"] <- 4003
+df_final$ethnic_all[df_final$ethnic_all=="Any other white background"] <- 1003
+df_final$ethnic_all[df_final$ethnic_all=="White and Asian"] <- 2003
+df_final$ethnic_all[df_final$ethnic_all=="Any other Asian background"] <- 3004
+df_final$ethnic_all[df_final$ethnic_all=="Black or Black British"] <- 4
+df_final$ethnic_all[df_final$ethnic_all=="Any other mixed background"] <- 2004
+df_final$ethnic_all[df_final$ethnic_all=="Chinese"] <- 5
+df_final$ethnic_all[df_final$ethnic_all=="Other ethnic group"] <- 6
+df_final$ethnic_all[df_final$ethnic_all=="Do not know"] <- -1
+df_final$ethnic_all[df_final$ethnic_all=="Prefer not to answer"] <- -3
+
+#Main ethnic groups (NB this makes some assumptions i.e. British is white, and does not include mixed, Chinese or other Asian)
+
+df_final$ethnic <- df_final$ethnic_all
+df_final$ethnic[df_final$ethnic_all==1001] <- 1
+df_final$ethnic[df_final$ethnic_all==1002] <- 1
+df_final$ethnic[df_final$ethnic_all==1003] <- 1
+df_final$ethnic[df_final$ethnic_all==3] <- 2
+df_final$ethnic[df_final$ethnic_all==3001] <- 2
+df_final$ethnic[df_final$ethnic_all==3002] <- 2
+df_final$ethnic[df_final$ethnic_all==3003] <- 2
+df_final$ethnic[df_final$ethnic_all==4] <- 3
+df_final$ethnic[df_final$ethnic_all==4001] <- 3
+df_final$ethnic[df_final$ethnic_all==4002] <- 3
+df_final$ethnic[df_final$ethnic_all==4003] <- 3
+df_final$ethnic[df_final$ethnic_all==2] <- 4
+df_final$ethnic[df_final$ethnic_all==2001] <- 4
+df_final$ethnic[df_final$ethnic_all==2002] <- 4
+df_final$ethnic[df_final$ethnic_all==2003] <- 4
+df_final$ethnic[df_final$ethnic_all==2004] <- 4
+df_final$ethnic[df_final$ethnic_all==3004] <- 4
+df_final$ethnic[df_final$ethnic_all==5] <- 4
+df_final$ethnic[df_final$ethnic_all==6] <- 4
+df_final$ethnic[df_final$ethnic_all==-1] <- NA
+df_final$ethnic[df_final$ethnic_all==-3] <- NA
+
+count(df_final,ethnic_all) # empty row, should be NA
+df_final$ethnic_all # empty row = ""
+
+df_final$ethnic[df_final$ethnic_all==""] <- NA
+
+```
+### Exclude participants with no registration of age, sex, BMI, ethnicity
+
+```{r echo=TRUE, results = 'hide'}
+# As matchit function does not allow NAs in covariats (age, sex, BMI, ethnicity), these have to be deleted. Create new dataframe df_merge_match
+
+df_merge_match <- df_final
+df_merge_match <- df_merge_match[!is.na(df_merge_match[,"Age"]),]
+df_merge_match <- df_merge_match[!is.na(df_merge_match[,"Sex"]),]
+df_merge_match <- df_merge_match[!is.na(df_merge_match[,"BMI"]),]
+df_merge_match <- df_merge_match[!is.na(df_merge_match[,"ethnic"]),]
+
+```
+
+### Count and baseline characteristics
+
+```{r echo=TRUE, results='hide'}
+# Count of diagnoses after age, sex, BMI, ethnicity exclusion
+count(df_final)
+count(df_merge_match)
+table(df_merge_match$AIH)
+table(df_merge_match$PBC)
+table(df_merge_match$AIH.PBC)
+table(df_merge_match$NAFLD)
+table(df_merge_match$ALD)
+table(df_merge_match$T1D)
+
+# Baseline characteristics of AIH, PBC and AIH-PBC overlap syndrome, NAFLD, ALD
+
+# AIH
+summary(df_merge_match$Age[df_merge_match$AIH == T])
+sd(df_merge_match$Age[df_merge_match$AIH == T])
+table(df_merge_match$Sex[df_merge_match$AIH == T])
+summary(df_merge_match$BMI[df_merge_match$AIH == T])
+sd(df_merge_match$BMI[df_merge_match$AIH == T],na.rm = T)
+table(df_merge_match$AIH,df_merge_match$ethnic)
+
+# PBC
+summary(df_merge_match$Age[df_merge_match$PBC == T])
+sd(df_merge_match$Age[df_merge_match$PBC == T])
+table(df_merge_match$Sex[df_merge_match$PBC == T])
+summary(df_merge_match$BMI[df_merge_match$PBC == T])
+sd(df_merge_match$BMI[df_merge_match$PBC == T],na.rm = T)
+table(df_merge_match$PBC,df_merge_match$ethnic)
+
+# AIH-PBC overlap syndrome
+summary(df_merge_match$Age[df_merge_match$AIH.PBC == T])
+sd(df_merge_match$Age[df_merge_match$AIH.PBC == T])
+table(df_merge_match$Sex[df_merge_match$AIH.PBC == T])
+summary(df_merge_match$BMI[df_merge_match$AIH.PBC == T])
+sd(df_merge_match$BMI[df_merge_match$AIH.PBC == T],na.rm = T)
+table(df_merge_match$AIH.PBC,df_merge_match$ethnic)
+
+# NAFLD
+summary(df_merge_match$Age[df_merge_match$NAFLD == T])
+sd(df_merge_match$Age[df_merge_match$NAFLD == T])
+table(df_merge_match$Sex[df_merge_match$NAFLD == T])
+summary(df_merge_match$BMI[df_merge_match$NAFLD == T])
+sd(df_merge_match$BMI[df_merge_match$NAFLD == T],na.rm = T)
+table(df_merge_match$NAFLD,df_merge_match$ethnic)
+
+# ALD
+summary(df_merge_match$Age[df_merge_match$ALD == T])
+sd(df_merge_match$Age[df_merge_match$ALD == T])
+table(df_merge_match$Sex[df_merge_match$ALD == T])
+summary(df_merge_match$BMI[df_merge_match$ALD == T])
+sd(df_merge_match$BMI[df_merge_match$ALD == T],na.rm = T)
+table(df_merge_match$ALD,df_merge_match$ethnic)
+
+```
+
+
+## Matched controls (age, sex, BMI, ethnicity) in AIH:
+
+Looking at the distribution of covariats before matching:
+
+```{r echo = TRUE, results='hide',fig.keep='none'}
+df.m.0.aih <- matchit(AIH ~ Age + Sex + BMI + ethnic, data = df_merge_match, method = NULL)
+summary(df.m.0.aih)
+plot(summary(df.m.0.aih))
+```
+
+Now matching (5 matched controls per AIH patient) - nearest neighboor propensity score matching method:
+
+```{r echo = TRUE, results='hide',fig.keep='none'}
+df.m.aih <- matchit(AIH ~ Age + Sex + BMI + ethnic, data=df_merge_match, ratio = 5)
+summary(df.m.aih)
+plot(summary(df.m.aih))
+df.m.aih.data <- match.data(df.m.aih) # creating new dataset
+```
+
+T2D risk in AIH:
+
+```{r echo=TRUE, results='hide'}
+table(df.m.aih.data$AIH, df.m.aih.data$T2D)
+
+glm.aih.t2d <- glm(data = df.m.aih.data, T2D ~ AIH, family = "binomial")
+summary(glm.aih.t2d)
+exp(coef(glm.aih.t2d)) # OR
+exp(confint.default(glm.aih.t2d)) # CI
+
+```
+
+Is risk caused by cirrhosis/NAFLD:
+
+```{r echo=TRUE, results='hide'}
+# matching on age, sex, BMI, ethnicity, NAFLD
+
+df.m.aih.nafld <- matchit(AIH ~ Age + Sex + BMI + ethnic + NAFLD, data=df_merge_match, ratio = 5)
+df.m.aih.nafld.data <- match.data(df.m.aih.nafld)
+table(df.m.aih.nafld.data$AIH)
+
+glm.aih.t2d.nafld <- glm(data = df.m.aih.nafld.data, T2D ~ AIH, family = "binomial")
+summary(glm.aih.t2d.nafld)
+exp(coef(glm.aih.t2d.nafld))
+exp(confint.default(glm.aih.t2d.nafld))
+
+# matching on age, sex, BMI, ethnicity, cirrhosis (broad cirrhosis definition)
+
+df.m.aih.cir <- matchit(AIH ~ Age + Sex + BMI + ethnic + cir, data=df_merge_match, ratio = 5)
+df.m.aih.cir.data <- match.data(df.m.aih.cir)
+table(df.m.aih.cir.data$AIH)
+
+glm.aih.t2d.cir <- glm(data = df.m.aih.cir.data, T2D ~AIH, family = "binomial")
+summary(glm.aih.t2d.cir)
+exp(coef(glm.aih.t2d.cir))
+exp(confint.default(glm.aih.t2d.cir))
+
+# matching on age, sex, BMI, ethnicity, cirrhosis (stringent cirrhosis definition)
+
+df.m.aih.cir2 <- matchit(AIH ~ Age + Sex + BMI + ethnic + cir2, data=df_merge_match, ratio = 5)
+df.m.aih.cir2.data <- match.data(df.m.aih.cir2)
+
+glm.aih.t2d.cir2 <- glm(data = df.m.aih.cir2.data, T2D ~AIH, family = "binomial")
+summary(glm.aih.t2d.cir2)
+exp(coef(glm.aih.t2d.cir2))
+exp(confint.default(glm.aih.t2d.cir2))
+
+```
+T1D risk in AIH:
+
+```{r echo=TRUE, results='hide',warning=FALSE}
+table(df.m.aih.data$AIH, df.m.aih.data$T1D)
+chisq.test(table(df.m.aih.data$AIH,df.m.aih.data$T1D)) $ expected # As expected count below 5 => fisher's test
+fisher.test(table(df.m.aih.data$AIH, df.m.aih.data$T1D))
+```
+
+## Matched controls (age, sex, BMI, ethnicity) in PBC:
+
+Looking at the distribution of covariats before matching:
+
+```{r echo=TRUE, results='hide',fig.keep='none'}
+df.m.0.pbc <- matchit(PBC ~ Age + Sex + BMI + ethnic, data = df_merge_match, method = NULL)
+summary(df.m.0.pbc) 
+plot(summary(df.m.0.pbc))
+```
+
+Now matching (5 matched controls per PBC patient):
+
+```{r echo = TRUE, results='hide',fig.keep='none'}
+df.m.pbc <- matchit(PBC ~ Age + Sex + BMI + ethnic, data=df_merge_match, ratio = 5)
+summary(df.m.pbc)
+plot(summary(df.m.aih))
+df.m.pbc.data <- match.data(df.m.pbc)
+```
+
+T2D risk in PBC:
+
+```{r echo = TRUE, results='hide'}
+glm.pbc.t2d <- glm(data = df.m.pbc.data, T2D ~ PBC, family = "binomial")
+summary(glm.pbc.t2d)
+exp(coef(glm.pbc.t2d)) # OR
+exp(confint.default(glm.pbc.t2d)) # CI
+
+```
+
+Is the increased risk caused by cirrhosis / NAFLD :
+
+```{r echo=TRUE, results='hide'}
+# matching on age, sex, BMI, ethnicity, NAFLD
+
+df.m.pbc.nafld <- matchit(PBC ~ Age + Sex + BMI + ethnic + NAFLD, data=df_merge_match, ratio = 5)
+df.m.pbc.nafld.data <- match.data(df.m.pbc.nafld)
+
+glm.pbc.t2d.nafld <- glm(data = df.m.pbc.nafld.data, T2D ~PBC, family = "binomial")
+summary(glm.pbc.t2d.nafld)
+exp(coef(glm.pbc.t2d.nafld)) 
+exp(confint.default(glm.pbc.t2d.nafld))
+
+# matching on age, sex, BMI, ethnicity, cirrhosis (broad cirrhosis definition)
+
+df.m.pbc.cir <- matchit(PBC ~ Age + Sex + BMI + ethnic + cir, data=df_merge_match, ratio = 5)
+df.m.pbc.cir.data <- match.data(df.m.pbc.cir)
+
+glm.pbc.t2d.cir <- glm(data = df.m.pbc.cir.data, T2D ~PBC, family = "binomial")
+summary(glm.pbc.t2d.cir)
+exp(coef(glm.pbc.t2d.cir))
+exp(confint.default(glm.pbc.t2d.cir))
+
+# matching on age, sex, BMI, ethnicity, cirrhosis (stringent cirrhosis definition)
+
+df.m.pbc.cir2 <- matchit(PBC ~ Age + Sex + BMI + ethnic + cir2, data=df_merge_match, ratio = 5)
+df.m.pbc.cir2.data <- match.data(df.m.pbc.cir2)
+
+glm.pbc.t2d.cir2 <- glm(data = df.m.pbc.cir2.data, T2D ~PBC, family = "binomial")
+summary(glm.pbc.t2d.cir2)
+exp(coef(glm.pbc.t2d.cir2))
+exp(confint.default(glm.pbc.t2d.cir2))
+
+```
+
+T1D risk in PBC:
+
+```{r echo=TRUE, results='hide',warning=FALSE}
+table(df.m.pbc.data$PBC, df.m.pbc.data$T1D)
+chisq.test(table(df.m.pbc.data$PBC,df.m.pbc.data$T1D)) $ expected # As expected count below 5 => fisher's test
+fisher.test(table(df.m.pbc.data$PBC, df.m.pbc.data$T1D))
+```
+
+## Matched controls (age, sex, BMI, ethnicity) in AIH-PBC overlap:
+
+Looking at the distribution of covariats before matching:
+
+```{r echo=TRUE, results='hide',fig.keep='none'}
+df.m.0.aihpbc <- matchit(AIH.PBC ~ Age + Sex + BMI + ethnic, data = df_merge_match, method = NULL)
+summary(df.m.0.aihpbc) 
+plot(summary(df.m.0.aihpbc))
+```
+
+Now matching (5 matched controls per AIH-PBC patient):
+
+```{r echo=TRUE, results='hide',fig.keep='none'}
+df.m.aihpbc <- matchit(AIH.PBC ~ Age + Sex + BMI + ethnic, data=df_merge_match, ratio = 5)
+summary(df.m.aihpbc)
+plot(summary(df.m.aihpbc))
+df.m.aihpbc.data <- match.data(df.m.aihpbc)
+```
+
+T2D risk in AIH-PBC:
+
+```{r echo = TRUE, results='hide'}
+
+glm.aihpbc.t2d <- glm(data = df.m.aihpbc.data, T2D ~ AIH.PBC, family = "binomial")
+summary(glm.aihpbc.t2d)
+exp(coef(glm.aihpbc.t2d)) # OR
+exp(confint.default(glm.aihpbc.t2d)) # CI
+
+```
+
+
+T1D risk in AIH-PBC:
+
+```{r echo=TRUE, results='hide',warning=FALSE}
+table(df.m.aihpbc.data$AIH.PBC, df.m.aihpbc.data$T1D)
+chisq.test(table(df.m.aihpbc.data$AIH.PBC,df.m.aihpbc.data$T1D)) $ expected # As expected count below 5 => fisher's test
+fisher.test(table(df.m.aihpbc.data$AIH.PBC, df.m.aihpbc.data$T1D))
+
+```
+
+## Matched controls (age, sex, BMI, ethnicity) in ALD:
+
+Looking at the distribution of covariats before matching:
+
+```{r echo=TRUE, results='hide',fig.keep='none'}
+df.m.0.ald <- matchit(ALD ~ Age + Sex + BMI + ethnic, data = df_merge_match, method = NULL)
+summary(df.m.0.ald)
+plot(summary(df.m.0.ald))
+```
+
+Now matching (5 matched controls per ALD): 
+
+```{r echo=TRUE, results='hide',fig.keep='none'}
+df.m.ald <- matchit(ALD ~ Age + Sex + BMI + ethnic, data=df_merge_match, ratio = 5)
+summary(df.m.ald)
+plot(summary(df.m.ald))
+df.m.ald.data <- match.data(df.m.ald)
+```
+
+T2D risk in ALD:
+ 
+```{r echo=TRUE, results='hide'}
+glm.ald.t2d <- glm(data = df.m.ald.data, T2D ~ ALD, family = "binomial")
+summary(glm.ald.t2d)
+exp(coef(glm.ald.t2d)) # OR
+exp(confint.default(glm.ald.t2d)) # CI
+```
+
+## Matched controls (age, sex, BMI, ethnicity) in NAFLD:
+
+Looking at the distribution of covariats before matching:
+
+```{r echo=TRUE, results='hide',fig.keep='none'}
+df.m.0.nafld <- matchit(NAFLD ~ Age + Sex + BMI + ethnic, data = df_merge_match, method = NULL)
+summary(df.m.0.nafld)
+plot(summary(df.m.0.nafld))
+```
+
+Now matching (5 matched controls per NAFLD): 
+
+```{r echo=TRUE, results='hide',fig.keep='none'}
+df.m.nafld <- matchit(NAFLD ~ Age + Sex + BMI + ethnic, data=df_merge_match, ratio = 5)
+summary(df.m.nafld) 
+plot(summary(df.m.nafld))
+df.m.nafld.data <- match.data(df.m.nafld)
+```
+
+T2D risk in NAFLD:
+ 
+```{r echo=TRUE, results='hide'}
+glm.nafld.t2d <- glm(data = df.m.nafld.data, T2D ~ NAFLD, family = "binomial")
+summary(glm.nafld.t2d)
+exp(coef(glm.nafld.t2d)) # OR
+exp(confint.default(glm.nafld.t2d)) # CI
+
+```
+
+## Barplot T2D
+
+```{r}
+# Create dataframe
+
+diagnosis <- rep(c("AIH","PBC","AIH-PBC","NAFLD","ALD"),each=2)
+Proportion <- rep(c("Cases","Age-,sex-, BMI-, and ethnicity-matched controls"),times=5)
+value <- c(13.7,8.6,15.7,9.1,14.6,8.8,22.2,12.2,14.7,10.5)
+
+T2D.df <- data.frame(diagnosis,Proportion,value)
+
+# To correct X-axis order (else alphabetical order) =>
+T2D.df$diagnosis <- factor(T2D.df$diagnosis,levels=unique(T2D.df$diagnosis)) 
+T2D.df$Proportion <- factor(T2D.df$Proportion,levels=unique(T2D.df$Proportion))
+
+ggplot(T2D.df, aes(x = diagnosis, y = value)) +  
+  geom_bar(stat = 'identity', position = 'dodge',aes(fill = Proportion)) + 
+  scale_fill_manual(values = c("#5B9BD5", "#44546A")) + 
+  ylab("Proportion type 2 diabetes (%)") + 
+  xlab("Diagnosis") + 
+  labs(fill = "") + 
+  geom_signif(stat = "identity", data = data.frame(x = c(0.7, 1.7, 2.7,3.7,4.7), 
+                                                   xend = c(1.3, 2.3, 3.3,4.3,5.3), 
+                                                   y = c(14.7, 16.7, 15.6,23.2,15.7), 
+                                                   annotation = c("")), 
+              aes(x = x, xend = xend, y=y, yend = y, annotation = annotation)) + 
+  annotate("text", x = 1:5, y = c(15.7, 17.7, 16.6,24.2,16.7), label = c("**","***","NS","***","***")) +
+  geom_text(aes (label = paste(format(value,nsmall = 1))), nudge_x = c(-0.225,0.225), nudge_y = -1, col = "white")
+
+# * = p-value < 0.05, ** = p-value < 0.01, *** = p-value < 0.001
+
+```
+
